@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from pymongo import MongoClient
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-from pyrogram.errors import ChatAdminNotFound, UserNotParticipant, ChannelInvalid, ChannelPrivate
+from pyrogram.errors import ChatAdminRequired, UserNotParticipant, ChannelInvalid, ChannelPrivate, BadRequest, Forbidden
 
 # Load env
 load_dotenv()
@@ -20,8 +20,9 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 DB_NAME = os.getenv("DB_NAME", "filebot_db")
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "files")
 
-# Logging
+# Logging84
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Client("file_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -30,7 +31,7 @@ mongo_client = MongoClient(DATABASE_URL)
 db = mongo_client[DB_NAME]
 collection = db[COLLECTION_NAME]
 
-# Ensure index for faster search (optional, runs once)
+# Ensure index for faster search
 collection.create_index("file_name")
 
 # Helper: Index last file from channel
@@ -61,14 +62,22 @@ async def index_last_file():
                     "chat_id": CHANNEL_ID
                 })
                 return f"Indexed: {file_name}"
-    except (ChatAdminNotFound, UserNotParticipant, ChannelInvalid, ChannelPrivate) as e:
-        return "Error: Bot is not admin in channel or access denied. Add bot as admin!"
+    except ChatAdminRequired:
+        logger.error("Bot requires admin privileges in the channel.")
+        return "Error: Bot needs admin rights in the channel to access history. Promote bot to admin!"
+    except UserNotParticipant:
+        logger.error("Bot is not a participant in the channel.")
+        return "Error: Bot is not added to the channel. Add bot first!"
+    except (ChannelInvalid, ChannelPrivate, BadRequest, Forbidden) as e:
+        logger.error(f"Channel access error: {str(e)}")
+        return f"Error: Invalid or private channel/access denied: {str(e)}. Check CHANNEL_ID and bot permissions!"
     except Exception as e:
+        logger.error(f"Unexpected error during indexing: {str(e)}")
         return f"Error indexing: {str(e)}"
 
 # Helper: Search files
 def search_files(query):
-    regex = {"$regex": query, "$options": "i"}  # Case-insensitive partial match
+    regex = {"$regex": query, "$options": "i"}  # Case-insensitive
     results = list(collection.find({"file_name": regex}).limit(10))
     return [(r["file_id"], r["file_name"], r["caption"]) for r in results]
 
@@ -89,7 +98,7 @@ async def index_cmd(client: Client, message: Message):
     result = await index_last_file()
     await message.reply(result)
 
-# Search handler (text without command, works in groups/PM)
+# Search handler
 @app.on_message(filters.text & ~filters.command(["start", "index"]))
 async def search_handler(client: Client, message: Message):
     query = message.text.strip()
@@ -121,13 +130,18 @@ async def file_callback(client: Client, callback_query):
         caption = doc["caption"]
         new_caption = f"{caption}\n\nFile: {file_name}" if caption else f"File: {file_name}"
         keyboard = [[InlineKeyboardButton("Search More", callback_data="more")]]
-        await client.send_document(
-            chat_id=callback_query.from_user.id,
-            document=file_id,
-            caption=new_caption,
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    await callback_query.answer("File sent!")
+        try:
+            await client.send_document(
+                chat_id=callback_query.from_user.id,
+                document=file_id,
+                caption=new_caption,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except Exception as e:
+            await callback_query.message.reply(f"Error sending file: {str(e)}")
+    else:
+        await callback_query.message.reply("File not found in database!")
+    await callback_query.answer("File sent!" if doc else "Error!")
 
 # Other callbacks
 @app.on_callback_query(filters.regex(r"^(help|more)$"))
