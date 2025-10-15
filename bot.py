@@ -1,64 +1,85 @@
+#!/usr/bin/env python3
 import asyncio
 import logging
-import sqlite3
+import os
+from dotenv import load_dotenv
+from pymongo import MongoClient
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from pyrogram.errors import ChatAdminNotFound, UserNotParticipant, ChannelInvalid, ChannelPrivate
-import config  # config.py import करें
 
-# Logging setup
+# Load env
+load_dotenv()
+
+# Config from env
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
+DATABASE_URL = os.getenv("DATABASE_URL")
+DB_NAME = os.getenv("DB_NAME", "filebot_db")
+COLLECTION_NAME = os.getenv("COLLECTION_NAME", "files")
+
+# Logging
 logging.basicConfig(level=logging.INFO)
 
-app = Client("file_bot", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
+app = Client("file_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# Database setup
-conn = sqlite3.connect(config.DB_NAME, check_same_thread=False)
-cursor = conn.cursor()
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS files (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        file_id TEXT NOT NULL,
-        file_name TEXT NOT NULL,
-        caption TEXT,
-        message_id INTEGER,
-        chat_id INTEGER
-    )
-""")
-conn.commit()
+# MongoDB setup
+mongo_client = MongoClient(DATABASE_URL)
+db = mongo_client[DB_NAME]
+collection = db[COLLECTION_NAME]
+
+# Ensure index for faster search (optional, runs once)
+collection.create_index("file_name")
 
 # Helper: Index last file from channel
 async def index_last_file():
     try:
-        async for message in app.get_chat_history(config.CHANNEL_ID, limit=1):
+        async for message in app.get_chat_history(CHANNEL_ID, limit=1):
             if message.document or message.video or message.audio or message.photo:
                 file_id = message.document.file_id if message.document else \
                           message.video.file_id if message.video else \
                           message.audio.file_id if message.audio else \
-                          message.photo.file_id
-                file_name = message.document.file_name if message.document else "file.jpg"
+                          message.photo.file_id if message.photo else None
+                if not file_id:
+                    return "No media file found in last message."
+                file_name = message.document.file_name if message.document else \
+                            message.video.file_name if message.video else \
+                            message.audio.file_name if message.audio else "photo.jpg"
                 caption = message.caption or ""
-                cursor.execute("INSERT INTO files (file_id, file_name, caption, message_id, chat_id) VALUES (?, ?, ?, ?, ?)",
-                               (file_id, file_name, caption, message.id, config.CHANNEL_ID))
-                conn.commit()
+                
+                # Check duplicate and insert
+                if collection.find_one({"file_id": file_id}):
+                    return f"Already indexed: {file_name}"
+                
+                collection.insert_one({
+                    "file_id": file_id,
+                    "file_name": file_name,
+                    "caption": caption,
+                    "message_id": message.id,
+                    "chat_id": CHANNEL_ID
+                })
                 return f"Indexed: {file_name}"
-    except (ChatAdminNotFound, UserNotParticipant, ChannelInvalid, ChannelPrivate):
-        return "Error: Bot is not admin in channel or channel invalid. Add bot as admin!"
+    except (ChatAdminNotFound, UserNotParticipant, ChannelInvalid, ChannelPrivate) as e:
+        return "Error: Bot is not admin in channel or access denied. Add bot as admin!"
     except Exception as e:
         return f"Error indexing: {str(e)}"
 
 # Helper: Search files
 def search_files(query):
-    cursor.execute("SELECT file_id, file_name, caption FROM files WHERE file_name LIKE ?", (f"%{query}%",))
-    return cursor.fetchall()
+    regex = {"$regex": query, "$options": "i"}  # Case-insensitive partial match
+    results = list(collection.find({"file_name": regex}).limit(10))
+    return [(r["file_id"], r["file_name"], r["caption"]) for r in results]
 
 # Start command
 @app.on_message(filters.command("start") & filters.private)
 async def start(client: Client, message: Message):
-    photo_url = "https://example.com/welcome.jpg"  # Replace with your photo URL or use local file
+    photo_url = "https://example.com/welcome.jpg"  # Replace
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Help", callback_data="help")]])
     await message.reply_photo(
         photo=photo_url,
-        caption="Welcome! This bot indexes files from channel. Use /index to add last file. Search files in groups!",
+        caption="Welcome to File Bot! Use /index to index files. Search in groups.",
         reply_markup=keyboard
     )
 
@@ -68,55 +89,54 @@ async def index_cmd(client: Client, message: Message):
     result = await index_last_file()
     await message.reply(result)
 
-# Search handler (in groups or PM, without command)
+# Search handler (text without command, works in groups/PM)
 @app.on_message(filters.text & ~filters.command(["start", "index"]))
 async def search_handler(client: Client, message: Message):
-    query = message.text
+    query = message.text.strip()
     results = search_files(query)
     if not results:
-        await message.reply("No files found!")
+        await message.reply("No matching files found!")
         return
     
+    total = collection.count_documents({"file_name": {"$regex": query, "$options": "i"}})
     keyboard = []
-    for file_id, file_name, caption in results[:10]:  # Limit to 10
-        keyboard.append([InlineKeyboardButton(file_name, callback_data=f"file:{file_id}")])
+    for file_id, file_name, caption in results:
+        keyboard.append([InlineKeyboardButton(file_name, callback_data=f"file:{file_id}:{file_name}")])
     
-    extra_btn = [InlineKeyboardButton("More Search", callback_data="more")]
-    keyboard.append(extra_btn)
+    if total > 10:
+        keyboard.append([InlineKeyboardButton("Show More", callback_data="more")])
     
     await message.reply(
-        f"Found {len(results)} files for '{query}':",
+        f"Found {total} files for '{query}' (showing 10):",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# Callback for file button
-@app.on_callback_query(filters.regex(r"^file:(.+)$"))
+# Callback for file
+@app.on_callback_query(filters.regex(r"^file:(.+):(.+)$"))
 async def file_callback(client: Client, callback_query):
     file_id = callback_query.matches[0].group(1)
-    # Fetch file details (assuming we store enough, or refetch if needed)
-    cursor.execute("SELECT file_name, caption FROM files WHERE file_id=?", (file_id,))
-    row = cursor.fetchone()
-    if row:
-        file_name, caption = row
+    file_name = callback_query.matches[0].group(2)
+    doc = collection.find_one({"file_id": file_id})
+    if doc:
+        caption = doc["caption"]
         new_caption = f"{caption}\n\nFile: {file_name}" if caption else f"File: {file_name}"
-        keyboard = [[InlineKeyboardButton("Download More", callback_data="more")]]
-        await callback_query.message.reply_document(
+        keyboard = [[InlineKeyboardButton("Search More", callback_data="more")]]
+        await client.send_document(
+            chat_id=callback_query.from_user.id,
             document=file_id,
             caption=new_caption,
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-    await callback_query.answer()
+    await callback_query.answer("File sent!")
 
 # Other callbacks
 @app.on_callback_query(filters.regex(r"^(help|more)$"))
 async def other_callback(client: Client, callback_query):
     if callback_query.data == "help":
-        await callback_query.message.reply("Help: Add bot to group, search file names. Use /index in PM.")
+        await callback_query.message.reply("Help: /start - Welcome, /index - Index last file. Search file names directly.")
     elif callback_query.data == "more":
-        await callback_query.message.reply("Search again!")
+        await callback_query.message.reply("Type another file name to search!")
     await callback_query.answer()
-
-# Group add/connect: Handlers automatically work in groups
 
 # Run bot
 if __name__ == "__main__":
