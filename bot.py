@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-import asyncio
 import logging
 import os
 from dotenv import load_dotenv
 from pymongo import MongoClient
-from pyrogram import Client, filters, idle  # Added idle here
+from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from pyrogram.errors import ChatAdminRequired, UserNotParticipant, ChannelInvalid, ChannelPrivate, BadRequest, Forbidden
 
@@ -29,7 +28,7 @@ app = Client("file_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 # MongoDB setup
 mongo_client = MongoClient(DATABASE_URL)
 db = mongo_client[DB_NAME]
-collection = db[YCOLLECTION_NAME]
+collection = db[COLLECTION_NAME]  # Fixed typo here
 
 # Ensure index for faster search
 collection.create_index("file_name")
@@ -68,11 +67,9 @@ async def index_last_file():
     except UserNotParticipant:
         logger.error("Bot is not a participant in the channel.")
         return "Error: Bot is not added to the channel. Add bot first!"
-    except (ChannelInvalid, ChannelPrivate
-
-, BadRequest, Forbidden) as e:
+    except (ChannelInvalid, ChannelPrivate, BadRequest, Forbidden) as e:
         logger.error(f"Channel access error: {str(e)}")
-        return f"Error: Invalid or private channel/access denied: {str(e)}. Check CHANNEL_ID and bot permissions!"
+        return f"Error: Invalid and private channel/access denied: {str(e)}. Check CHANNEL_ID and bot permissions!"
     except Exception as e:
         logger.error(f"Unexpected error during indexing: {str(e)}")
         return f"Error indexing: {str(e)}"
@@ -86,7 +83,7 @@ def search_files(query):
 # Start command
 @app.on_message(filters.command("start") & filters.private)
 async def start(client: Client, message: Message):
-    photo_url = "https://example.com/welcome.jpg"  # Replace
+    photo_url = "https://example.com/welcome.jpg"  # Replace with your photo URL
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Help", callback_data="help")]])
     await message.reply_photo(
         photo=photo_url,
@@ -100,7 +97,7 @@ async def index_cmd(client: Client, message: Message):
     result = await index_last_file()
     await message.reply(result)
 
-# Search handler
+# Search handler (text without command)
 @app.on_message(filters.text & ~filters.command(["start", "index"]))
 async def search_handler(client: Client, message: Message):
     query = message.text.strip()
@@ -111,7 +108,7 @@ async def search_handler(client: Client, message: Message):
     
     total = collection.count_documents({"file_name": {"$regex": query, "$options": "i"}})
     keyboard = []
-    for file_id, file_name, caption in results:
+    for file_id, file_name, _ in results:  # caption not needed here
         keyboard.append([InlineKeyboardButton(file_name, callback_data=f"file:{file_id}:{file_name}")])
     
     if total > 10:
@@ -123,7 +120,7 @@ async def search_handler(client: Client, message: Message):
     )
 
 # Callback for file
-@app.on_callback_query(filters.regex(r r"^file:(.+):(.+)$"))
+@app.on_callback_query(filters.regex(r"^file:(.+):(.+)$"))  # Fixed regex syntax
 async def file_callback(client: Client, callback_query):
     file_id = callback_query.matches[0].group(1)
     file_name = callback_query.matches[0].group(2)
@@ -135,7 +132,7 @@ async def file_callback(client: Client, callback_query):
         try:
             await client.send_document(
                 chat_id=callback_query.from_user.id,
-                document=file_id,
+                documentions document=file_id,
                 caption=new_caption,
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
@@ -159,7 +156,7 @@ if __name__ == "__main__":
     try:
         app.start()
         logger.info("Bot is running...")
-        idle()  # Keeps the bot alive and handling updates
+        idle()  # Keeps the bot alive
     except Exception as e:
         logger.error(f"Bot crashed: {str(e)}")
     finally:
