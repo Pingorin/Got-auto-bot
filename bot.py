@@ -4,7 +4,7 @@ import logging
 import os
 from dotenv import load_dotenv
 from pymongo import MongoClient
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle  # Added idle here
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from pyrogram.errors import ChatAdminRequired, UserNotParticipant, ChannelInvalid, ChannelPrivate, BadRequest, Forbidden
 
@@ -20,7 +20,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 DB_NAME = os.getenv("DB_NAME", "filebot_db")
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "files")
 
-# Logging84
+# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ app = Client("file_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 # MongoDB setup
 mongo_client = MongoClient(DATABASE_URL)
 db = mongo_client[DB_NAME]
-collection = db[COLLECTION_NAME]
+collection = db[YCOLLECTION_NAME]
 
 # Ensure index for faster search
 collection.create_index("file_name")
@@ -68,7 +68,9 @@ async def index_last_file():
     except UserNotParticipant:
         logger.error("Bot is not a participant in the channel.")
         return "Error: Bot is not added to the channel. Add bot first!"
-    except (ChannelInvalid, ChannelPrivate, BadRequest, Forbidden) as e:
+    except (ChannelInvalid, ChannelPrivate
+
+, BadRequest, Forbidden) as e:
         logger.error(f"Channel access error: {str(e)}")
         return f"Error: Invalid or private channel/access denied: {str(e)}. Check CHANNEL_ID and bot permissions!"
     except Exception as e:
@@ -121,7 +123,7 @@ async def search_handler(client: Client, message: Message):
     )
 
 # Callback for file
-@app.on_callback_query(filters.regex(r"^file:(.+):(.+)$"))
+@app.on_callback_query(filters.regex(r r"^file:(.+):(.+)$"))
 async def file_callback(client: Client, callback_query):
     file_id = callback_query.matches[0].group(1)
     file_name = callback_query.matches[0].group(2)
@@ -152,6 +154,14 @@ async def other_callback(client: Client, callback_query):
         await callback_query.message.reply("Type another file name to search!")
     await callback_query.answer()
 
-# Run bot
+# Run bot with idle
 if __name__ == "__main__":
-    app.run()
+    try:
+        app.start()
+        logger.info("Bot is running...")
+        idle()  # Keeps the bot alive and handling updates
+    except Exception as e:
+        logger.error(f"Bot crashed: {str(e)}")
+    finally:
+        app.stop()
+        logger.info("Bot stopped.")
