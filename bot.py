@@ -71,7 +71,7 @@ async def index_last_file():
                     "chat_id": CHANNEL_ID
                 })
                 return f"Indexed: {file_name}"
-    recent except ChatAdminRequired:
+    except ChatAdminRequired:
         logger.error("Bot requires admin privileges.")
         return "Error: Bot needs admin rights in channel!"
     except UserNotParticipant:
@@ -103,7 +103,7 @@ async def start(client: Client, message: Message):
             reply_markup=keyboard
         )
     except Exception as e:
-        logger.warning(f"Photo send failed: {str(e)}. Sending text instead2.")
+        logger.warning(f"Photo send failed: {str(e)}. Sending text instead.")
         await message.reply(
             "Welcome to File Bot! Use /index to index files. Search in groups.",
             reply_markup=keyboard
